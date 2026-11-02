@@ -63,16 +63,9 @@ jobs:
             throw ("fheroes2.exe is not ARM64 (machine 0x{0:X4})" -f $machine)
           }
 
-          Copy-Item "$env:VCPKG_INSTALLATION_ROOT\installed\arm64-windows\bin\*.dll" $out -Force
-
-          $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
-          $vs = & $vswhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.ARM64 -property installationPath
-          $crt = Get-ChildItem -Path "$vs\VC\Redist\MSVC" -Recurse -Filter "vcruntime140.dll" |
-            Where-Object { $_.DirectoryName -match '\\arm64\\' } |
-            Select-Object -First 1
-          if ($crt) {
-            Copy-Item (Join-Path $crt.DirectoryName "*.dll") $out -Force
-          }
+          Get-ChildItem "$env:VCPKG_INSTALLATION_ROOT\installed\arm64-windows\bin\*.dll" |
+            Where-Object { $_.Name -notmatch '^(concrt|msvcp|vcamp|vccorlib|vcruntime)' } |
+            Copy-Item -Destination $out -Force
 
           $stage = Join-Path $PWD "dist\stage"
           if (Test-Path $stage) { Remove-Item $stage -Recurse -Force }
