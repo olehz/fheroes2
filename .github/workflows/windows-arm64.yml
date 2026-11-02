@@ -1,0 +1,121 @@
+name: Windows ARM64
+
+on:
+  push:
+    branches: [windows-arm64]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: SDL2 ARM64
+    runs-on: windows-11-arm
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies
+        shell: pwsh
+        run: |
+          & "$env:VCPKG_INSTALLATION_ROOT\vcpkg.exe" install sdl2 sdl2-mixer sdl2-image zlib --triplet arm64-windows
+
+      - name: Configure and build
+        shell: pwsh
+        run: |
+          $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          & $vswhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.ARM64 -property installationPath
+          cmake -B build -A ARM64 `
+            -DENABLE_IMAGE=ON `
+            -DENABLE_TOOLS=ON `
+            "-DCMAKE_TOOLCHAIN_FILE=$env:VCPKG_INSTALLATION_ROOT/scripts/buildsystems/vcpkg.cmake" `
+            -DVCPKG_TARGET_TRIPLET=arm64-windows
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cmake --build build --config Release --parallel
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Generate translations
+        shell: cmd
+        run: |
+          C:\msys64\usr\bin\pacman.exe -S --noconfirm --noprogressbar gettext make
+          set PATH=C:\msys64\usr\bin;%PATH%
+          C:\msys64\usr\bin\make.exe -C files/lang -j 2
+
+      - name: Package
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $exe = Get-ChildItem -Path build -Recurse -Filter fheroes2.exe |
+            Where-Object { $_.FullName -match '\\Release\\' } |
+            Select-Object -First 1
+          if (-not $exe) {
+            $exe = Get-ChildItem -Path build -Recurse -Filter fheroes2.exe | Select-Object -First 1
+          }
+          if (-not $exe) { throw "fheroes2.exe was not produced" }
+          $out = $exe.DirectoryName
+          Write-Host "Binary directory: $out"
+
+          $bytes = [System.IO.File]::ReadAllBytes($exe.FullName)
+          $pe = [BitConverter]::ToInt32($bytes, 0x3C)
+          $machine = [BitConverter]::ToUInt16($bytes, $pe + 4)
+          if ($machine -ne 0xAA64) {
+            throw ("fheroes2.exe is not ARM64 (machine 0x{0:X4})" -f $machine)
+          }
+
+          Copy-Item "$env:VCPKG_INSTALLATION_ROOT\installed\arm64-windows\bin\*.dll" $out -Force
+
+          $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          $vs = & $vswhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.ARM64 -property installationPath
+          $crt = Get-ChildItem -Path "$vs\VC\Redist\MSVC" -Recurse -Filter "vcruntime140.dll" |
+            Where-Object { $_.DirectoryName -match '\\arm64\\' } |
+            Select-Object -First 1
+          if ($crt) {
+            Copy-Item (Join-Path $crt.DirectoryName "*.dll") $out -Force
+          }
+
+          $stage = Join-Path $PWD "dist\stage"
+          if (Test-Path $stage) { Remove-Item $stage -Recurse -Force }
+          New-Item -ItemType Directory -Force -Path $stage, "$stage\docs", "$stage\files\data", "$stage\files\lang", "$stage\files\timidity", "$stage\maps", "$stage\script\demo", "$stage\script\homm2" | Out-Null
+          Copy-Item "$out\*.exe", "$out\*.dll" $stage
+          Copy-Item LICENSE, changelog.txt $stage
+          Copy-Item docs\README.txt "$stage\docs\"
+          Copy-Item files\data\*.h2d "$stage\files\data\"
+          Copy-Item files\lang\*.mo "$stage\files\lang\"
+          if (Test-Path files\timidity) { Copy-Item files\timidity\* "$stage\files\timidity\" -Recurse -Force }
+          Copy-Item maps\*.fh2m "$stage\maps\"
+          Copy-Item script\demo\*.bat, script\demo\*.ps1 "$stage\script\demo\"
+          Copy-Item script\homm2\*.bat, script\homm2\*.ps1 "$stage\script\homm2\"
+
+          $zip = Join-Path $PWD "dist\fheroes2_windows_arm64_SDL2.zip"
+          if (Test-Path $zip) { Remove-Item $zip -Force }
+          & 7z.exe a -bb1 -tzip $zip "$stage\*"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: fheroes2_windows_arm64_SDL2
+          path: dist/fheroes2_windows_arm64_SDL2.zip
+          if-no-files-found: error
+
+      - name: Publish release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $ErrorActionPreference = "Stop"
+          $PSNativeCommandUseErrorActionPreference = $false
+          $notes = @"
+          Unofficial native Windows ARM64 build of fheroes2 ${{ github.sha }}.
+
+          The original Heroes of Might and Magic II data is not included. Copy ANIM, DATA, MAPS and MUSIC from a GOG or Ubisoft copy next to fheroes2.exe, or run script/demo/download_demo_version.bat for the free English demo.
+          "@
+          $zip = "dist/fheroes2_windows_arm64_SDL2.zip"
+          $tag = "windows-arm64"
+          gh release view $tag
+          if ($LASTEXITCODE -eq 0) {
+            gh release upload $tag $zip --clobber
+          } else {
+            gh release create $tag $zip --target windows-arm64 --title "Windows ARM64 SDL2" --notes $notes --prerelease
+          }
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
